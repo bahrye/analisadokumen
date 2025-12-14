@@ -231,6 +231,7 @@ function smartSearchInStream(stream, pdfLine) {
   return res;
 }
 
+// --- UPDATE FIX: DYNAMIC SEARCH HORIZON ---
 function performSearch(stream, textToFind) {
   var res = { found: false, startIndex: -1, endIndex: -1, text: "" };
   var words = textToFind.split(" ");
@@ -249,24 +250,66 @@ function performSearch(stream, textToFind) {
   
   if (idxHead !== -1) {
     var endIndexFound = -1;
+    
     if (!isLong) {
       endIndexFound = idxHead + searchHead.length;
     } else {
-      // Jarak toleransi pencarian ekor (cukup jauh untuk paragraf panjang)
-      var lookAheadMax = 3000; 
-      var subStream = stream.substring(idxHead, idxHead + lookAheadMax);
-      var idxTailRel = subStream.toLowerCase().indexOf(searchTail.toLowerCase());
-      if (idxTailRel !== -1) {
-        endIndexFound = idxHead + idxTailRel + searchTail.length;
-      } else {
-        // Fallback: Ekor tidak ketemu (mungkin kepotong halaman/typo berat)
-        // Ambil panjang teks PDF sebagai estimasi potong
-        endIndexFound = idxHead + textToFind.length;
-        if (endIndexFound > stream.length) endIndexFound = stream.length;
+      // --- PERBAIKAN DI SINI ---
+      // Jangan pakai fixed 4000. Gunakan range dinamis.
+      // Kita hanya mencari sejauh 3x panjang teks asli (atau minimal 200 karakter).
+      // Ini mencegah teks pendek di PDF "mencaplok" teks sampai akhir dokumen Doc.
+      var searchHorizon = Math.max(200, textToFind.length * 3); 
+      
+      var subStream = stream.substring(idxHead, idxHead + searchHorizon);
+      var tailLower = searchTail.toLowerCase();
+      
+      var bestMatchLen = -1;
+      var minDiff = Number.MAX_VALUE;
+      var currentPos = 0;
+      var targetLength = textToFind.length;
+
+      // Loop cari kandidat ekor terbaik dalam range aman
+      while (true) {
+        var foundTail = subStream.toLowerCase().indexOf(tailLower, currentPos);
+        if (foundTail === -1) break; 
+
+        var candidateLen = foundTail + searchTail.length;
+        var diff = Math.abs(candidateLen - targetLength);
+
+        if (diff < minDiff) {
+          minDiff = diff;
+          bestMatchLen = candidateLen;
+        }
+
+        currentPos = foundTail + 1;
       }
+
+      if (bestMatchLen !== -1) {
+        // SAFETY CHECK TERAKHIR:
+        // Jika hasil temuan ternyata > 4x lebih panjang dari aslinya, 
+        // abaikan (kemungkinan salah tangkap ekor yang umum).
+        if (bestMatchLen > (targetLength * 4)) {
+           endIndexFound = idxHead + targetLength; // Potong manual
+        } else {
+           endIndexFound = idxHead + bestMatchLen;
+        }
+      } else {
+        // Fallback: Ekor tidak ketemu dalam range
+        endIndexFound = idxHead + textToFind.length;
+      }
+      
+      // Pastikan tidak melebihi batas stream
+      if (endIndexFound > stream.length) endIndexFound = stream.length;
     }
-    return { found: true, startIndex: idxHead, endIndex: endIndexFound, text: stream.substring(idxHead, endIndexFound) };
+    
+    return { 
+      found: true, 
+      startIndex: idxHead, 
+      endIndex: endIndexFound, 
+      text: stream.substring(idxHead, endIndexFound) 
+    };
   }
+  
   return res;
 }
 
