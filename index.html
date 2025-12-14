@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: sans-serif; padding: 20px; }
+      .box { border: 1px solid #ccc; padding: 20px; border-radius: 8px; background: #f9f9f9; }
+      button { background-color: #4285f4; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+      button:disabled { background-color: #ccc; }
+      #hasil { margin-top: 20px; }
+    </style>
+  </head>
+  <body>
+    <h2>Analisis Perbedaan Dokumen</h2>
+    <p>File Master (2024) sudah tersimpan di sistem.</p>
+    <p>Silakan upload file PDF 2025 untuk dibandingkan:</p>
+    
+    <div class="box">
+      <form id="myForm" onsubmit="handleFormSubmit(this)">
+        <input type="file" name="filePdf" accept="application/pdf" required />
+        <br><br>
+        <button type="submit" id="btnSubmit">Bandingkan Sekarang</button>
+      </form>
+    </div>
+
+    <div id="hasil"></div>
+
+    <script>
+      function handleFormSubmit(formObject) {
+        var btn = document.getElementById('btnSubmit');
+        var div = document.getElementById('hasil');
+        
+        btn.disabled = true;
+        btn.innerHTML = "Sedang Menganalisis (OCR)...";
+        div.innerHTML = ""; // Bersihkan hasil lama
+
+        google.script.run
+          .withSuccessHandler(function(result) {
+            div.innerHTML = result;
+            btn.disabled = false;
+            btn.innerHTML = "Bandingkan Sekarang";
+          })
+          .withFailureHandler(function(err) {
+            div.innerHTML = "<p style='color:red'>Error: " + err + "</p>";
+            btn.disabled = false;
+            btn.innerHTML = "Bandingkan Sekarang";
+          })
+          .prosesUpload(formObject);
+          
+        // Mencegah form submit default (refresh halaman)
+        event.preventDefault();
+      }
+    </script>
+  </body>
+</html>
