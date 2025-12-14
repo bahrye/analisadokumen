@@ -1,15 +1,10 @@
 // --- KONFIGURASI ---
-var DOC_ASLI_ID = "1eURvpy7nplm6wUlvgEhZJDCI0SaI1EqiURnARaTaDsY";
-
-// Titik Mulai (Header sebelum ini diabaikan)
-var ANCHOR_POINT = "DENGAN";
-
-// Berapa baris ke depan sistem boleh "mengintip" untuk mencari pasangan yang cocok?
-var LOOK_AHEAD_LIMIT = 10; 
+var DOC_ASLI_ID = "1eURvpy7nplm6wUlvgEhZJDCI0SaI1EqiURnARaTaDsY"; // Masukkan ID Doc Anda
+var ANCHOR_POINT = "DENGAN"; // Header cutoff
 
 function doGet() {
   return HtmlService.createHtmlOutputFromFile('index')
-      .setTitle('Analisis Dokumen (Auto-Sync Mode)');
+      .setTitle('Analisis Dokumen (Smart Offset Fix)');
 }
 
 function prosesUpload(formObject) {
@@ -24,27 +19,27 @@ function prosesUpload(formObject) {
     var rawFile = DriveApp.createFile(blob);
     rawFileId = rawFile.getId();
     var mimeType = rawFile.getMimeType();
-    var textBaru = "";
+    var textPdfRaw = "";
 
     if (mimeType === MimeType.PDF || mimeType === "application/pdf") {
       var resource = { title: "[TEMP] " + blob.getName(), mimeType: MimeType.GOOGLE_DOCS };
       var convertedFile = Drive.Files.copy(resource, rawFileId, {ocr: true});
       convertedFileId = convertedFile.id;
-      textBaru = DocumentApp.openById(convertedFileId).getBody().getText();
+      textPdfRaw = DocumentApp.openById(convertedFileId).getBody().getText();
     } else {
-      textBaru = DocumentApp.openById(rawFileId).getBody().getText();
+      textPdfRaw = DocumentApp.openById(rawFileId).getBody().getText();
     }
 
-    // 2. Baca Doc Asli
+    // 2. Baca Doc
     var docAsli = DocumentApp.openById(DOC_ASLI_ID);
-    var textAsli = docAsli.getBody().getText();
+    var textDocRaw = docAsli.getBody().getText();
 
-    // 3. Bersihkan Sampah
-    if (rawFileId) DriveApp.getFileById(rawFileId).setTrashed(true);
-    if (convertedFileId) DriveApp.getFileById(convertedFileId).setTrashed(true);
+    // 3. Bersihkan
+    if (rawFileId) try { DriveApp.getFileById(rawFileId).setTrashed(true); } catch(x){}
+    if (convertedFileId) try { DriveApp.getFileById(convertedFileId).setTrashed(true); } catch(x){}
 
-    // 4. Jalankan Banding Auto-Sync
-    return bandingkanAutoSync(textAsli, textBaru);
+    // 4. Analisis
+    return bandingkanFollowPdf(textDocRaw, textPdfRaw);
 
   } catch (e) {
     if (rawFileId) try { DriveApp.getFileById(rawFileId).setTrashed(true); } catch(x){}
@@ -53,151 +48,247 @@ function prosesUpload(formObject) {
   }
 }
 
-// --- LOGIKA UTAMA: AUTO-SYNC / LOOK AHEAD ---
+// --- LOGIKA UTAMA ---
 
-function bandingkanAutoSync(textDoc, textPdf) {
-  // 1. Bersihkan dan Potong Header berdasarkan Anchor
-  var linesDoc = cleanAndSlice(textDoc);
-  var linesPdf = cleanAndSlice(textPdf);
-
-  if (linesDoc.length === 0 || linesPdf.length === 0) {
-    return "<h3>⚠️ Anchor Tidak Ditemukan</h3><p>Pastikan kalimat '" + ANCHOR_POINT + "' ada di kedua dokumen.</p>";
+function bandingkanFollowPdf(textDoc, textPdf) {
+  var linesPdf = cleanAndSlice(textPdf); 
+  var docLinesRaw = cleanAndSlice(textDoc);
+  var streamDoc = docLinesRaw.join(" ").replace(/\s+/g, " ").trim(); 
+  
+  if (linesPdf.length === 0) {
+    return "<h3>⚠️ Anchor '" + ANCHOR_POINT + "' tidak ditemukan di PDF.</h3>";
   }
 
-  var html = "<h3>✅ Hasil Analisis (Mode Auto-Sync):</h3><ul>";
+  var html = "<h3>✅ Hasil Analisis (Support Huruf a., b., dst):</h3><ul>";
   var diffCount = 0;
 
-  var i = 0; // Pointer Doc
-  var j = 0; // Pointer PDF
+  for (var i = 0; i < linesPdf.length; i++) {
+    var lineP = linesPdf[i].replace(/\s+/g, " ").trim(); 
+    if (lineP === "") continue;
 
-  while (i < linesDoc.length || j < linesPdf.length) {
-    var lDoc = linesDoc[i] || "";
-    var lPdf = linesPdf[j] || "";
-    
-    // Normalisasi untuk perbandingan (abaikan spasi/kapital kecil)
-    var cleanDoc = normalize(lDoc);
-    var cleanPdf = normalize(lPdf);
+    var matchResult = smartSearchInStream(streamDoc, lineP);
 
-    // KASUS 1: COCOK SEMPURNA
-    if (cleanDoc === cleanPdf) {
-      // Sama persis, lanjut ke baris berikutnya
-      i++;
-      j++;
-    } 
-    // KASUS 2: TIDAK COCOK - Mari cari penyebabnya
-    else {
-      diffCount++;
-      
-      // Strategi: Cari "lDoc" ini ada di baris-baris PDF ke depan tidak?
-      var matchInPdf = findAhead(cleanDoc, linesPdf, j + 1);
-      
-      // Strategi: Cari "lPdf" ini ada di baris-baris Doc ke depan tidak?
-      var matchInDoc = findAhead(cleanPdf, linesDoc, i + 1);
-
-      if (matchInPdf !== -1) {
-        // ==> Artinya: Di PDF ada baris sisipan (EXTRA) sebelum baris ini.
-        // Kita cetak baris-baris sisipan tersebut sebagai "Tambahan di PDF"
-        // Lalu lompatkan pointer J ke posisi yang cocok.
-        
-        while (j < matchInPdf) {
-          html += itemHtml("➕ Tambahan di PDF (Baris Baru)", "", linesPdf[j], "hijau");
-          j++;
-        }
-        // Sekarang i dan j sudah sinkron lagi di baris yang sama
-
-      } else if (matchInDoc !== -1) {
-        // ==> Artinya: Di Doc ada baris yang HILANG di PDF.
-        // Kita cetak baris yang hilang itu.
-        // Lalu lompatkan pointer I ke posisi yang cocok.
-        
-        while (i < matchInDoc) {
-          html += itemHtml("❌ Hilang di PDF (Terhapus)", linesDoc[i], "", "merah");
-          i++;
-        }
-        // Sekarang i dan j sudah sinkron lagi
-
-      } else {
-        // ==> Artinya: Benar-benar beda (Diedit) atau urutan kacau balau.
-        // Tampilkan sebagai perbedaan biasa, lalu paksa maju dua-duanya.
-        html += itemHtml("⚠️ Perbedaan Isi (Edit)", lDoc, lPdf, "kuning");
-        i++;
-        j++;
+    if (matchResult.found) {
+      // 1. Teks Terlewati
+      var skippedText = streamDoc.substring(0, matchResult.startIndex).trim();
+      if (skippedText.length > 0) {
+        html += itemHtml("❌ Ada di Doc, Hilang di PDF", skippedText, "", "merah");
+        diffCount++;
       }
+
+      // 2. Cek Kecocokan & Generate Diff
+      var matchedDocText = matchResult.text;
+      
+      // Gunakan Smart Diff Generator yang baru (Auto Offset)
+      var finalDiff = generateSmartDiff(matchedDocText, lineP);
+      
+      // Hitung jumlah error (span merah)
+      var errorCount = (finalDiff.doc.match(/background-color:#ffcccc/g) || []).length;
+
+      if (errorCount === 0) {
+         html += itemHtml("✅ Cocok", matchedDocText, lineP, "normal"); 
+      } else {
+         html += itemHtml("⚠️ Beda Isi / Typo", finalDiff.doc, finalDiff.pdf, "kuning", true);
+         diffCount++;
+      }
+
+      streamDoc = streamDoc.substring(matchResult.endIndex);
+
+    } else {
+      html += itemHtml("➕ Tambahan di PDF", "", lineP, "hijau");
+      diffCount++;
     }
   }
 
-  if (diffCount === 0) return "<h3>🎉 Dokumen IDENTIK!</h3>";
-  
+  if (streamDoc.trim().length > 0) {
+    html += itemHtml("❌ Sisa Teks di Doc", streamDoc, "", "merah");
+    diffCount++;
+  }
+
   html += "</ul>";
+  if (diffCount === 0) html = "<h3>🎉 Dokumen IDENTIK!</h3>" + html;
+  
   return html;
 }
 
-// --- HELPER FUNCTIONS ---
-
-// Mencari string target di array lines mulai dari index start
-// Mengembalikan index jika ketemu dalam batas LOOK_AHEAD_LIMIT, atau -1 jika tidak
-function findAhead(targetStr, linesArray, startIndex) {
-  if (targetStr === "") return -1;
-  var limit = Math.min(linesArray.length, startIndex + LOOK_AHEAD_LIMIT);
+// --- SMART DIFF GENERATOR (CORE FIX) ---
+// Fungsi ini mendeteksi jika PDF punya bullet point tapi Doc tidak,
+// lalu menggeser perbandingan agar sinkron.
+function generateSmartDiff(textDoc, textPdf) {
+  var wordsDoc = textDoc.split(" ");
+  var wordsPdf = textPdf.split(" ");
   
-  for (var k = startIndex; k < limit; k++) {
-    if (normalize(linesArray[k]) === targetStr) {
-      return k;
+  var htmlDoc = "";
+  var htmlPdf = "";
+  
+  var pIdx = 0; // Pointer PDF
+  var dIdx = 0; // Pointer Doc
+  
+  // Cek Offset Awal: Apakah PDF[0] adalah nomor/huruf list, tapi Doc[0] bukan?
+  // Contoh: PDF "a." vs Doc "PIHAK"
+  var offsetDetected = false;
+  var firstPdfIsList = /^[a-zA-Z0-9]{1,3}[\.\)]$/.test(wordsPdf[0]); // Regex deteksi a. atau 1.
+  
+  if (firstPdfIsList && wordsPdf[0] !== wordsDoc[0]) {
+    // Cek apakah kata kedua PDF cocok dengan kata pertama Doc?
+    // PDF: a. PIHAK ... | Doc: PIHAK ...
+    if (wordsDoc[0] === wordsPdf[1]) {
+      offsetDetected = true;
+      
+      // Render PDF[0] sebagai "Extra Format" (Hijau muda/Abu) bukan Error
+      htmlPdf += "<span style='background-color:#e6ffe6; color:#188038; padding:0 2px;'>[" + escapeHtml(wordsPdf[0]) + "]</span> ";
+      pIdx = 1; // Majukan pointer PDF 1 langkah
     }
   }
-  return -1;
+  
+  // Loop perbandingan kata demi kata
+  while (pIdx < wordsPdf.length || dIdx < wordsDoc.length) {
+    var wP = wordsPdf[pIdx] || "";
+    var wD = wordsDoc[dIdx] || "";
+    
+    // Normalisasi untuk perbandingan isi (abaikan titik koma di ujung kata)
+    var cleanP = wP.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    var cleanD = wD.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    
+    var isDiff = cleanP !== cleanD;
+    
+    // Formatting HTML
+    var prefix = "";
+    var suffix = "";
+    if (isDiff) {
+      prefix = "<span style='background-color:#ffcccc; color:#d93025; font-weight:bold; padding:0 2px; border-radius:2px;'>";
+      suffix = "</span>";
+    }
+    
+    if (wD) htmlDoc += prefix + escapeHtml(wD) + suffix + " ";
+    if (wP) htmlPdf += prefix + escapeHtml(wP) + suffix + " ";
+    
+    pIdx++;
+    dIdx++;
+  }
+  
+  return { doc: htmlDoc.trim(), pdf: htmlPdf.trim() };
 }
 
-function itemHtml(label, textDoc, textPdf, warna) {
-  var styleDoc = "";
-  var stylePdf = "";
-  var bg = "#fff";
+// --- HELPER SMART SEARCH ---
+function smartSearchInStream(stream, pdfLine) {
+  var res = { found: false, startIndex: -1, endIndex: -1, text: "" };
   
-  if (warna === "merah") { // Hilang
-    styleDoc = "background:#ffe6e6; color:#d93025; text-decoration:line-through";
-    stylePdf = "display:none;";
-  } else if (warna === "hijau") { // Tambahan
-    styleDoc = "display:none;";
-    stylePdf = "background:#e6ffe6; color:#188038;";
-  } else { // Edit/Beda
-    styleDoc = "background:#fff5e6; color:#d93025;"; // Oranye muda
-    stylePdf = "background:#fff5e6; color:#188038;";
+  // 1. Coba Cari Persis
+  var try1 = performSearch(stream, pdfLine);
+  if (try1.found) return try1;
+
+  // 2. Coba Cari Tanpa Nomor (Regex diperkuat)
+  var cleanLine = removeNumbering(pdfLine);
+  if (cleanLine !== pdfLine && cleanLine.length > 3) {
+    var try2 = performSearch(stream, cleanLine);
+    if (try2.found) return try2;
+  }
+  return res;
+}
+
+function performSearch(stream, textToFind) {
+  var res = { found: false, startIndex: -1, endIndex: -1, text: "" };
+  var words = textToFind.split(" ");
+  var searchHead = "";
+  var searchTail = "";
+  var isLong = words.length >= 6;
+
+  if (!isLong) {
+    searchHead = textToFind;
+  } else {
+    searchHead = words.slice(0, 3).join(" ");
+    searchTail = words.slice(-3).join(" ");
   }
 
-  var html = "<li style='margin-bottom:15px; border-bottom:1px solid #eee; padding:10px;'>" +
-             "<strong>" + label + ":</strong><br>";
+  var idxHead = stream.toLowerCase().indexOf(searchHead.toLowerCase());
+  
+  if (idxHead !== -1) {
+    var endIndexFound = -1;
+    if (!isLong) {
+      endIndexFound = idxHead + searchHead.length;
+    } else {
+      // Jarak toleransi pencarian ekor (cukup jauh untuk paragraf panjang)
+      var lookAheadMax = 3000; 
+      var subStream = stream.substring(idxHead, idxHead + lookAheadMax);
+      var idxTailRel = subStream.toLowerCase().indexOf(searchTail.toLowerCase());
+      if (idxTailRel !== -1) {
+        endIndexFound = idxHead + idxTailRel + searchTail.length;
+      } else {
+        // Fallback: Ekor tidak ketemu (mungkin kepotong halaman/typo berat)
+        // Ambil panjang teks PDF sebagai estimasi potong
+        endIndexFound = idxHead + textToFind.length;
+        if (endIndexFound > stream.length) endIndexFound = stream.length;
+      }
+    }
+    return { found: true, startIndex: idxHead, endIndex: endIndexFound, text: stream.substring(idxHead, endIndexFound) };
+  }
+  return res;
+}
+
+function removeNumbering(str) {
+  // Regex: 
+  // ^               = Awal baris
+  // [\s\(]* = Spasi atau kurung buka (opsional)
+  // [0-9a-zA-Z]{1,3}= Angka/Huruf 1-3 digit (1, 10, a, aa, IV)
+  // \s* = Spasi (mungkin ada antara huruf dan titik)
+  // [\.\)]          = Titik atau Kurung Tutup
+  // \s* = Spasi setelahnya
+  return str.replace(/^[\s\(]*[0-9a-zA-Z]{1,3}\s*[\.\)]\s*/, "");
+}
+
+function itemHtml(label, textDoc, textPdf, warna, isHtml) {
+  var styleDoc = "color:#333;";
+  var stylePdf = "color:#333;";
+  var rowStyle = "border-left: 4px solid #ccc;";
+
+  if (warna === "merah") { 
+    styleDoc = "background:#ffe6e6; color:#d93025; text-decoration:line-through;";
+    stylePdf = "display:none;";
+    rowStyle = "border-left: 4px solid #d93025;";
+  } else if (warna === "hijau") { 
+    styleDoc = "display:none;";
+    stylePdf = "background:#e6ffe6; color:#188038;";
+    rowStyle = "border-left: 4px solid #188038;";
+  } else if (warna === "kuning") { 
+    styleDoc = "background:#fff8e1; color:#333;"; 
+    stylePdf = "background:#fff8e1; color:#333;";
+    rowStyle = "border-left: 4px solid #f9ab00;";
+  } else { 
+    styleDoc = "color:#5f6368;"; 
+    stylePdf = "color:#5f6368;";
+    rowStyle = "border-left: 4px solid #1e8e3e;"; 
+  }
+
+  var contentDoc = isHtml ? textDoc : escapeHtml(textDoc);
+  var contentPdf = isHtml ? textPdf : escapeHtml(textPdf);
+
+  var html = "<li style='margin-bottom:10px; background:#fff; padding:8px; list-style:none; box-shadow:0 1px 2px rgba(0,0,0,0.1); " + rowStyle + "'>" +
+             "<div style='font-weight:bold; font-size:12px; margin-bottom:4px; color:#444;'>" + label + "</div>";
              
-  if (textDoc) html += "<div style='padding:4px; " + styleDoc + "'>Doc: " + escapeHtml(textDoc) + "</div>";
-  if (textPdf) html += "<div style='padding:4px; " + stylePdf + "'>PDF: " + escapeHtml(textPdf) + "</div>";
+  if (textDoc) html += "<div style='font-size:13px; font-family:monospace; white-space:pre-wrap; " + styleDoc + "'>📄 Doc: " + contentDoc + "</div>";
+  if (textPdf) html += "<div style='font-size:13px; font-family:monospace; white-space:pre-wrap; border-top:1px dashed #ddd; margin-top:4px; padding-top:4px; " + stylePdf + "'>📑 PDF: " + contentPdf + "</div>";
   
   html += "</li>";
   return html;
 }
 
 function normalize(str) {
-  // Hapus spasi, simbol aneh, dan jadikan lowercase untuk pencarian yang 'memaafkan'
   return str.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 }
 
 function cleanAndSlice(text) {
+  if (!text) return [];
   var lines = text.split('\n');
   var startIndex = -1;
-  
-  // 1. Cari Anchor
   for (var i = 0; i < lines.length; i++) {
     if (lines[i].toUpperCase().includes(ANCHOR_POINT)) {
       startIndex = i;
       break;
     }
   }
-  
-  // 2. Jika tidak ketemu, anggap dari awal (atau return error di main function)
   var processedLines = (startIndex !== -1) ? lines.slice(startIndex + 1) : lines;
-
-  // 3. Trim dan Hapus Baris Kosong
-  return processedLines
-    .map(function(l) { return l.trim(); })
-    .filter(function(l) { return l !== ""; });
+  return processedLines.map(function(l) { return l.trim(); }).filter(function(l) { return l !== ""; });
 }
 
 function escapeHtml(text) {
