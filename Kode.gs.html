@@ -1,0 +1,206 @@
+// --- KONFIGURASI ---
+var DOC_ASLI_ID = "1eURvpy7nplm6wUlvgEhZJDCI0SaI1EqiURnARaTaDsY";
+
+// Titik Mulai (Header sebelum ini diabaikan)
+var ANCHOR_POINT = "DENGAN";
+
+// Berapa baris ke depan sistem boleh "mengintip" untuk mencari pasangan yang cocok?
+var LOOK_AHEAD_LIMIT = 10; 
+
+function doGet() {
+  return HtmlService.createHtmlOutputFromFile('index')
+      .setTitle('Analisis Dokumen (Auto-Sync Mode)');
+}
+
+function prosesUpload(formObject) {
+  var rawFileId = null;
+  var convertedFileId = null;
+
+  try {
+    var blob = formObject.filePdf;
+    if (!blob || blob.getName() == "") return "Error: File belum dipilih.";
+
+    // 1. Upload & OCR
+    var rawFile = DriveApp.createFile(blob);
+    rawFileId = rawFile.getId();
+    var mimeType = rawFile.getMimeType();
+    var textBaru = "";
+
+    if (mimeType === MimeType.PDF || mimeType === "application/pdf") {
+      var resource = { title: "[TEMP] " + blob.getName(), mimeType: MimeType.GOOGLE_DOCS };
+      var convertedFile = Drive.Files.copy(resource, rawFileId, {ocr: true});
+      convertedFileId = convertedFile.id;
+      textBaru = DocumentApp.openById(convertedFileId).getBody().getText();
+    } else {
+      textBaru = DocumentApp.openById(rawFileId).getBody().getText();
+    }
+
+    // 2. Baca Doc Asli
+    var docAsli = DocumentApp.openById(DOC_ASLI_ID);
+    var textAsli = docAsli.getBody().getText();
+
+    // 3. Bersihkan Sampah
+    if (rawFileId) DriveApp.getFileById(rawFileId).setTrashed(true);
+    if (convertedFileId) DriveApp.getFileById(convertedFileId).setTrashed(true);
+
+    // 4. Jalankan Banding Auto-Sync
+    return bandingkanAutoSync(textAsli, textBaru);
+
+  } catch (e) {
+    if (rawFileId) try { DriveApp.getFileById(rawFileId).setTrashed(true); } catch(x){}
+    if (convertedFileId) try { DriveApp.getFileById(convertedFileId).setTrashed(true); } catch(x){}
+    return "Error System: " + e.toString();
+  }
+}
+
+// --- LOGIKA UTAMA: AUTO-SYNC / LOOK AHEAD ---
+
+function bandingkanAutoSync(textDoc, textPdf) {
+  // 1. Bersihkan dan Potong Header berdasarkan Anchor
+  var linesDoc = cleanAndSlice(textDoc);
+  var linesPdf = cleanAndSlice(textPdf);
+
+  if (linesDoc.length === 0 || linesPdf.length === 0) {
+    return "<h3>⚠️ Anchor Tidak Ditemukan</h3><p>Pastikan kalimat '" + ANCHOR_POINT + "' ada di kedua dokumen.</p>";
+  }
+
+  var html = "<h3>✅ Hasil Analisis (Mode Auto-Sync):</h3><ul>";
+  var diffCount = 0;
+
+  var i = 0; // Pointer Doc
+  var j = 0; // Pointer PDF
+
+  while (i < linesDoc.length || j < linesPdf.length) {
+    var lDoc = linesDoc[i] || "";
+    var lPdf = linesPdf[j] || "";
+    
+    // Normalisasi untuk perbandingan (abaikan spasi/kapital kecil)
+    var cleanDoc = normalize(lDoc);
+    var cleanPdf = normalize(lPdf);
+
+    // KASUS 1: COCOK SEMPURNA
+    if (cleanDoc === cleanPdf) {
+      // Sama persis, lanjut ke baris berikutnya
+      i++;
+      j++;
+    } 
+    // KASUS 2: TIDAK COCOK - Mari cari penyebabnya
+    else {
+      diffCount++;
+      
+      // Strategi: Cari "lDoc" ini ada di baris-baris PDF ke depan tidak?
+      var matchInPdf = findAhead(cleanDoc, linesPdf, j + 1);
+      
+      // Strategi: Cari "lPdf" ini ada di baris-baris Doc ke depan tidak?
+      var matchInDoc = findAhead(cleanPdf, linesDoc, i + 1);
+
+      if (matchInPdf !== -1) {
+        // ==> Artinya: Di PDF ada baris sisipan (EXTRA) sebelum baris ini.
+        // Kita cetak baris-baris sisipan tersebut sebagai "Tambahan di PDF"
+        // Lalu lompatkan pointer J ke posisi yang cocok.
+        
+        while (j < matchInPdf) {
+          html += itemHtml("➕ Tambahan di PDF (Baris Baru)", "", linesPdf[j], "hijau");
+          j++;
+        }
+        // Sekarang i dan j sudah sinkron lagi di baris yang sama
+
+      } else if (matchInDoc !== -1) {
+        // ==> Artinya: Di Doc ada baris yang HILANG di PDF.
+        // Kita cetak baris yang hilang itu.
+        // Lalu lompatkan pointer I ke posisi yang cocok.
+        
+        while (i < matchInDoc) {
+          html += itemHtml("❌ Hilang di PDF (Terhapus)", linesDoc[i], "", "merah");
+          i++;
+        }
+        // Sekarang i dan j sudah sinkron lagi
+
+      } else {
+        // ==> Artinya: Benar-benar beda (Diedit) atau urutan kacau balau.
+        // Tampilkan sebagai perbedaan biasa, lalu paksa maju dua-duanya.
+        html += itemHtml("⚠️ Perbedaan Isi (Edit)", lDoc, lPdf, "kuning");
+        i++;
+        j++;
+      }
+    }
+  }
+
+  if (diffCount === 0) return "<h3>🎉 Dokumen IDENTIK!</h3>";
+  
+  html += "</ul>";
+  return html;
+}
+
+// --- HELPER FUNCTIONS ---
+
+// Mencari string target di array lines mulai dari index start
+// Mengembalikan index jika ketemu dalam batas LOOK_AHEAD_LIMIT, atau -1 jika tidak
+function findAhead(targetStr, linesArray, startIndex) {
+  if (targetStr === "") return -1;
+  var limit = Math.min(linesArray.length, startIndex + LOOK_AHEAD_LIMIT);
+  
+  for (var k = startIndex; k < limit; k++) {
+    if (normalize(linesArray[k]) === targetStr) {
+      return k;
+    }
+  }
+  return -1;
+}
+
+function itemHtml(label, textDoc, textPdf, warna) {
+  var styleDoc = "";
+  var stylePdf = "";
+  var bg = "#fff";
+  
+  if (warna === "merah") { // Hilang
+    styleDoc = "background:#ffe6e6; color:#d93025; text-decoration:line-through";
+    stylePdf = "display:none;";
+  } else if (warna === "hijau") { // Tambahan
+    styleDoc = "display:none;";
+    stylePdf = "background:#e6ffe6; color:#188038;";
+  } else { // Edit/Beda
+    styleDoc = "background:#fff5e6; color:#d93025;"; // Oranye muda
+    stylePdf = "background:#fff5e6; color:#188038;";
+  }
+
+  var html = "<li style='margin-bottom:15px; border-bottom:1px solid #eee; padding:10px;'>" +
+             "<strong>" + label + ":</strong><br>";
+             
+  if (textDoc) html += "<div style='padding:4px; " + styleDoc + "'>Doc: " + escapeHtml(textDoc) + "</div>";
+  if (textPdf) html += "<div style='padding:4px; " + stylePdf + "'>PDF: " + escapeHtml(textPdf) + "</div>";
+  
+  html += "</li>";
+  return html;
+}
+
+function normalize(str) {
+  // Hapus spasi, simbol aneh, dan jadikan lowercase untuk pencarian yang 'memaafkan'
+  return str.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
+
+function cleanAndSlice(text) {
+  var lines = text.split('\n');
+  var startIndex = -1;
+  
+  // 1. Cari Anchor
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].toUpperCase().includes(ANCHOR_POINT)) {
+      startIndex = i;
+      break;
+    }
+  }
+  
+  // 2. Jika tidak ketemu, anggap dari awal (atau return error di main function)
+  var processedLines = (startIndex !== -1) ? lines.slice(startIndex + 1) : lines;
+
+  // 3. Trim dan Hapus Baris Kosong
+  return processedLines
+    .map(function(l) { return l.trim(); })
+    .filter(function(l) { return l !== ""; });
+}
+
+function escapeHtml(text) {
+  if (!text) return "";
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
